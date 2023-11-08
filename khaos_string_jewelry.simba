@@ -1,0 +1,202 @@
+{$DEFINE SCRIPT_ID := ''}
+{$DEFINE SCRIPT_REVISION := '1'}
+{$DEFINE SCRIPT_GUI}
+{$I SRL-T/osr.simba}
+{$I WaspLib/osr.simba}
+
+begin
+  Login.PlayerIndex := 0;
+  StatsPayload.SetUsername('');
+end;
+
+type
+  ERSAmuletType = (
+    SAPPHIRE, EMERALD, RUBY, DIAMOND
+  );
+
+var
+  CurrentAmulet: ERSAmuletType := ERSAmuletType.DIAMOND;
+
+type
+  TScript = record(TBaseBankScript)
+    Unstrung, Strung, Astral: TRSItem;
+    IsCasting: Boolean;
+    BankedItem: TRSBankItem;
+  end;
+
+procedure TAntiban.Setup(); override;
+begin
+  Self.Skills := [ERSSkill.MAGIC, ERSSkill.CRAFTING, ERSSkill.TOTAL];
+  Self.MinZoom := 65;
+  Self.MaxZoom := 85;
+
+  inherited;
+end;
+
+procedure TScript.Init(maxActions: Int32; maxTime: Int64); override;
+begin
+  inherited;
+
+  Self.RSW.SetupNamedRegion();
+
+  Self.IsCasting := False;
+  Self.Astral := 'Astral rune';
+  case CurrentAmulet of
+    ERSAmuletType.SAPPHIRE:
+      begin
+        Self.Unstrung := 'Sapphire amulet (u)';
+        Self.Strung := 'Sapphire amulet';
+      end;
+    ERSAmuletType.EMERALD:
+      begin
+        Self.Unstrung := 'Emerald amulet (u)';
+        Self.Strung := 'Emerald amulet';
+      end;
+    ERSAmuletType.RUBY:
+      begin
+        Self.Unstrung := 'Ruby amulet (u)';
+        Self.Strung := 'Ruby amulet';
+      end;
+    ERSAmuletType.DIAMOND:
+      begin
+        Self.Unstrung := 'Diamond amulet (u)';
+        Self.Strung := 'Diamond amulet';
+      end;
+  end;
+
+  Self.BankedItem := TRSBankItem.Setup(Self.Unstrung, -1, False);
+
+  if not Magic.IsSpellBook(ERSSpellBook.LUNAR) then
+  begin
+    WriteLn('Not on lunar spellbook, terminating script');
+    Self.Terminate();
+  end;
+end;
+
+function TScript.Deposit(item: TRSItem): Boolean;
+begin
+  if Bank.DepositItem(item, True) then
+    Result := WaitUntil(not Inventory.ContainsItem(item), 200, 6000);
+end;
+
+function TScript.CastStringAmmy(): Boolean;
+begin
+  Magic.CastSpell(ERSSpell.STRING_JEWELLERY);
+  Self.IsCasting := True;
+  Wait(500,24000);
+  Result := WaitUntil(Inventory.CountItem(Self.Unstrung) = 0, 200, 8000);
+  Self.TotalActions += 27;
+  WriteLn('Total XP: ' + ToStr(Self.TotalActions * 83));
+end;
+
+procedure TScript.Run(maxActions: Int32; maxTime: Int64);
+begin
+  Self.Init(maxActions, maxTime);
+
+  repeat
+    if WL.Activity.IsFinished() then
+      Break;
+
+    if Chat.LeveledUp() then
+    begin
+      Self.IsCasting := False;
+      Chat.HandleLevelUp();
+    end;
+
+    if MainScreen.HasInterface() then
+    begin
+      if Bank.IsOpen() then
+      begin
+        if Inventory.ContainsItem(Self.Strung) then  //add your deposit items condition
+          Self.Deposit(Self.Strung);
+
+        if not Inventory.ContainsItem(Self.Unstrung) then //add your withdraw items condition
+          Self.Withdraw(Self.BankedItem);
+      end;
+
+      if not Self.CollectEmpty and CollectBox.IsOpen() then
+        Self.HandleCollectBox([Self.Unstrung, Self.Astral]);
+
+      MainScreen.CloseInterface();
+    end;
+
+    if Self.BankEmpty then
+      Break;
+
+    if Inventory.ContainsItem(Self.Unstrung) then
+    begin
+      if not Self.IsCasting then
+        Self.CastStringAmmy();
+
+      Continue;
+    end
+    else
+    begin
+      Wait(400,4200);
+      Bank.WalkOpen();
+    end
+
+    Self.IsCasting := False;
+
+    Self.DoAntiban();
+  until Self.ShouldStop();
+end;
+
+var
+  Script: TScript;
+
+{$IFDEF SCRIPT_GUI}
+type
+  TConfig = record(TScriptForm)
+    Selector: TLabeledCombobox;
+  end;
+
+procedure TConfig.StartScript(Sender: TObject); override;
+begin
+  CurrentAmulet := ERSAmuletType(Self.Selector.getItemIndex());
+  inherited;
+end;
+
+procedure TConfig.Run(); override;
+var
+  tab: TTabSheet;
+begin
+  Self.Setup('Bank script');
+  Self.Start.setOnClick(@Self.StartScript);
+
+  Self.AddTab('Script Settings');
+  tab := Self.Tabs[High(Self.Tabs)];
+
+  Self.CreateAccountManager(tab);
+
+  with Self.Selector do
+  begin
+    Create(tab);
+    SetCaption('Amulet:');
+    SetLeft(TControl.AdjustToDPI(40));
+    SetTop(TControl.AdjustToDPI(170));
+    SetStyle(csDropDownList);
+    AddItemArray(['Sapphire', 'Emerald', 'Ruby', 'Diamond']);
+    SetItemIndex(3);
+  end;
+
+  Self.CreateVersionPanel(tab);
+
+  Self.CreateAntibanManager();
+  Self.CreateBankSettings();
+  Self.CreateWaspLibSettings();
+  Self.CreateAPISettings();
+
+  inherited;
+end;
+
+var
+  Config: TConfig;
+{$ENDIF}
+
+begin
+  {$IFDEF SCRIPT_GUI}
+  Config.Run();
+  {$ENDIF}
+  Script.Run(WLSettings.MaxActions, WLSettings.MaxTime);
+end.

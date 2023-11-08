@@ -1,0 +1,1197 @@
+ {$UNDEF SCRIPT_ID}{$DEFINE SCRIPT_ID := 'Khaos PriffPocketer'}
+{$UNDEF SCRIPT_REVISION}{$DEFINE SCRIPT_REVISION := '1'}
+{$IFDEF WINDOWS}{$DEFINE FORMS_V2}{$DEFINE SCRIPT_GUI}{$ENDIF}
+{$I SRL-T/osr.simba}
+{$I WaspLib/osr.simba}
+
+begin
+  Login.PlayerIndex := 0;
+  StatsPayload.SetUsername('');
+end;
+
+var
+  DiaryLevel: Int32 := 3;
+  FoodAmount: Int32 := 10;
+  NeckAmount: Int32 := 2;
+  MinHealth: Int32 := 22;
+  EXPERIMENTALWALK: Boolean := True;
+    //Path 2: [[3805, 2047], [3825, 2073], [3841, 2102], [3854, 2120], [3882, 2113]]
+  //Path 3: [[3805, 2049], [3818, 2068], [3838, 2088], [3853, 2104], [3868, 2119]]
+  //Path 4: [[3810, 2045], [3814, 2066], [3831, 2083], [3835, 2105], [3853, 2115], [3884, 2116]]
+  //Path 5: [[3808, 2047], [3816, 2062], [3838, 2078], [3841, 2104], [3858, 2107], [3869, 2119]]
+
+  NPCTile: TPoint := [3805, 2047];
+  BankTile: TPoint := [3882, 2113];
+
+type
+  EThieverState = (
+    OPEN_BANK,
+    DEPOSIT_LOOT,
+    WITHDRAW_FOOD,
+    WITHDRAW_NECKLACES,
+    DEPOSIT_NECK,
+    DEPOSIT_FOOD,
+    CLOSE_INTERFACE,
+
+    OPEN_CHAT,
+    CHANGE_CHAT_FILTER,
+
+    WALK_TO_NPC,
+    EQUIP_ROGUE,
+
+    CAST_SHADOW_VEIL,
+    PICKPOCKET,
+    OPEN_POUCH,
+
+    EAT_FOOD,
+    EQUIP_NECKLACE,
+    CHECK_NECKLACE,
+    CLOSE_CONTEXT,
+    HEAL_TO_FULL,
+
+    DROP_ITEMS,
+    WAIT_STATE,
+
+    END_SCRIPT
+  );
+
+  TThiever = record(TBaseBankScript)
+    //init variables (to be set while the script is initiates)
+    State: EThieverState;
+
+    UseShadowVeil: Boolean;
+
+    Elf: TRSNPC;
+
+    CoinPouch: TRSItem;
+    Necklace: TRSItem;
+    ValuableItem: TRSItem;
+
+    LootArray, StackableArray, DropArray, RogueEquipment, BankArray: TRSItemArray;
+
+    GearAmount, ValuableItemValue: Int32;
+
+    NeckTimer: TCountDown;
+    ShadowVeilTimer: TCountDown;
+    LasPickPosition: TPoint;
+
+    //run variables (to be used while the script is running)
+    RenderDisabled: Boolean;
+    HasNeck: Boolean;
+    FreshNeck: Boolean;
+
+    CoinPouchLimit, MaxHit, NextHeal: Int32;
+  end;
+
+
+procedure TAntiban.Setup(); override;
+begin
+  Self.Skills := [ERSSkill.THIEVING, ERSSkill.TOTAL];
+  Self.MinZoom := 5;
+  Self.MaxZoom := 15;
+
+  inherited;
+end;
+(*
+procedure DownloadToFile(const URL, Filename: string);
+var
+  Client: Int32;
+begin
+  Client := InitializeHTTPClient(False);
+  try
+    GetHTTPPageEx(Client, URL, Filename);
+  finally
+    FreeHTTPClient(Client);
+  end;
+end;
+*)
+procedure TThiever.SetupNPC();
+begin
+  // elf by door: CTS2(8096661, 4, 0.16, 0.52)
+  Self.Elf.Setup([[3805, 2047]]);
+  Self.Elf.Setup(['Miriel']);
+  Self.Elf.Finder.Colors += CTS2(16711935, 1, 0.01, 0.01);
+
+  Elf.Filter.Walker := False;
+end;
+
+procedure TThiever.CheckRogueEquipment();
+var
+  ProfitMultiplier: Double;
+  Item: TRSItem;
+begin
+  if Inventory.Open() then
+  begin
+    if Inventory.ContainsItem('Rogue mask') then
+    begin
+      ProfitMultiplier += 0.2;
+      Self.RogueEquipment += 'Rogue mask';
+    end;
+
+    if Inventory.ContainsItem('Rogue top') then
+    begin
+      ProfitMultiplier += 0.2;
+      Self.RogueEquipment += 'Rogue top';
+    end;
+
+    if Inventory.ContainsItem('Rogue trousers') then
+    begin
+      ProfitMultiplier += 0.2;
+      Self.RogueEquipment += 'Rogue trousers';
+    end;
+
+    if Inventory.ContainsItem('Rogue gloves') then
+    begin
+      ProfitMultiplier += 0.2;
+      Self.RogueEquipment += 'Rogue gloves';
+    end;
+
+    if Inventory.ContainsItem('Rogue boots') then
+    begin
+      ProfitMultiplier += 0.2;
+      Self.RogueEquipment += 'Rogue boots';
+    end;
+
+    //This are not part of rogue equipment but are useful while thieving
+    if Inventory.ContainsItem('Thieving cape') then
+      Self.RogueEquipment += 'Thieving cape'
+    else if Inventory.ContainsItem('Thieving cape(t)') then
+      Self.RogueEquipment += 'Thieving cape(t)'
+    else if Inventory.ContainsItem('Max cape') then
+      Self.RogueEquipment += 'Max cape';
+
+    //Lava staves for shadow veil spell
+    if Inventory.ContainsItem('Lava battlestaff') then
+      Self.RogueEquipment += 'Lava battlestaff'
+    else if Inventory.ContainsItem('Mystic lava staff') then
+      Self.RogueEquipment += 'Mystic lava staff'
+    else if Inventory.ContainsItem(21200) then
+      Self.RogueEquipment += 21200
+    else if Inventory.ContainsAll(['Earth battlestaff', 'Tome of fire']) then
+    begin
+      Self.RogueEquipment += 'Earth battlestaff';
+      Self.RogueEquipment += 'Tome of fire';
+    end;
+  end;
+
+  if Equipment.Open() then
+  begin
+    if Equipment.ContainsItem('Rogue mask') then
+    begin
+      ProfitMultiplier += 0.2;
+      Self.RogueEquipment += 'Rogue mask';
+    end;
+
+    if Equipment.ContainsItem('Rogue top') then
+    begin
+      ProfitMultiplier += 0.2;
+      Self.RogueEquipment += 'Rogue top';
+    end;
+
+    if Equipment.ContainsItem('Rogue trousers') then
+    begin
+      ProfitMultiplier += 0.2;
+      Self.RogueEquipment += 'Rogue trousers';
+    end;
+
+    if Equipment.ContainsItem('Rogue gloves') then
+    begin
+      ProfitMultiplier += 0.2;
+      Self.RogueEquipment += 'Rogue gloves';
+    end;
+
+    if Equipment.ContainsItem('Rogue boots') then
+    begin
+      ProfitMultiplier += 0.2;
+      Self.RogueEquipment += 'Rogue boots';
+    end;
+
+
+    //This are not part of rogue equipment but are useful while thieving
+    if Equipment.ContainsItem('Thieving cape') then
+      Self.RogueEquipment += 'Thieving cape'
+    else if Equipment.ContainsItem('Thieving cape(t)') then
+      Self.RogueEquipment += 'Thieving cape(t)';
+
+    //Lava staves for shadow veil spell
+    if Equipment.ContainsItem('Lava battlestaff') then
+      Self.RogueEquipment += 'Lava battlestaff'
+    else if Equipment.ContainsItem('Mystic lava staff') then
+      Self.RogueEquipment += 'Mystic lava staff'
+    else if Equipment.ContainsItem(21200) then
+      Self.RogueEquipment += 21200
+    else if Equipment.ContainsAll(['Earth battlestaff', 'Tome of fire']) then
+    begin
+      Self.RogueEquipment += 'Earth battlestaff';
+      Self.RogueEquipment += 'Tome of fire';
+    end;
+  end;
+
+  GearAmount := Equipment.CountGear();
+  if not Equipment.IsSlotUsed(ERSEquipmentButton.AMULET) then
+    GearAmount += 1;
+
+  ActionProfit += Round(ActionProfit * ProfitMultiplier);
+
+  for Item in Self.RogueEquipment do
+    StackableArray += Item; //Adding Self.RogueEquipment to the non banking item list
+end;
+
+procedure TThiever.Init(maxActions: Int32; maxTime: Int64); override;
+begin
+  inherited;
+
+  Self.RSW.Setup([RSRegions.PRIFDDINAS]);
+  Self.SetupNPC();
+  Mouse.Speed := Random(21,27);
+  RSW.AdaptiveWalk := True;
+
+  FoodHandler.Amount := FoodAmount;
+
+  if DiaryLevel = 4 then
+    DiaryLevel += 1;
+
+  CoinPouch := 'Coin pouch';
+  Necklace := 'Dodgy necklace';
+
+  LootArray := [
+    CoinPouch, 'Coins', 'Death rune', 'Jug of wine', 'Nature rune',
+    'Fire orb', 'Diamond', 'Gold ore', 'Crystal shards','Enhanced crystal teleport seed'
+  ];
+
+  DropArray := ['Gold ore', 'Jug', 'Flax', 'Fire orb'];
+
+  StackableArray := [CoinPouch, 'Coins', 'Death rune', 'Nature rune', 'Crystal shards', 'Cosmic rune'];
+
+  MaxHit := 5;
+
+  BankArray := ['Fire orb', 'Diamond', 'Gold ore', 'Flax', 'Enhanced crystal teleport seed', 'Jug'];
+
+  ActionProfit := 560;
+  ValuableItem := 'Enhanced crystal teleport seed';
+  ValuableItemValue := ItemData.GetAverage(ValuableItem);
+
+  MinHealth := Max(Self.MaxHit, MinHealth);
+
+  //NeckTimer to recheck necklace in case the script messes up.
+  NeckTimer.Init(140000);
+
+  Self.CheckRogueEquipment();
+  HasNeck := Equipment.ContainsItem(Necklace);
+  if Magic.CanActivate(ERSSpell.SHADOW_VEIL) then
+  begin
+    UseShadowVeil := True;
+    //Magic.CastSpell(ERSSpell.SHADOW_VEIL);
+    ShadowVeilTimer.Init(1000 * Round(0.6 * Stats.GetCurrentLevel(ERSSkill.MAGIC)));
+  end;
+
+  if WLSettings.RemoteInput.HUDDebug then
+    //DebugMMDotArray += Elf;
+
+end;
+
+
+function TRSInventory.HoverItems(Items: TRSItemArray): Boolean;
+var
+  Item: TRSItem;
+  Slot: Int32;
+begin
+  for Item in Items do
+    if Result := Self.FindItem(Item, Slot) then Break;
+
+  if Result then Mouse.Move(Self.GetSlotBox(Slot));
+end;
+
+function TRSInventory.ClickItems(Items: TRSItemArray; Option: String = ''): Boolean;
+begin
+  if Self.HoverItems(Items) then
+  begin
+    if (Option <> '') then Result := ChooseOption.Select(Option)
+    else
+    begin
+      Mouse.Click(MOUSE_LEFT);
+      Result := True;
+    end;
+  end;
+end;
+
+function TRSInventory.CountItems(Items: TRSItemArray): Int32;
+var
+  Item: TRSItem;
+begin
+  for Item in Items do Result += Self.CountItem(Item);
+end;
+
+
+function TThiever.HasRogue(): Boolean;
+begin
+  Result := Inventory.ContainsAny(Self.RogueEquipment);
+end;
+
+function TThiever.EquipRogue(): Boolean;
+var
+  Item: TRSItem;
+begin
+  for Item in Self.RogueEquipment do
+    if Inventory.ClickItem(Item) then
+      Wait(200, 300);
+
+  if Inventory.ClickItem(21200) then
+    Wait(200, 300);
+
+  Result := not Self.HasRogue and not Inventory.ContainsItem('Lava battlestaff');
+end;
+
+
+function TThiever.HasSpace(): Boolean;
+begin
+  if (Length(LootArray) > 2) then
+    Result := (Inventory.CountEmptySlots >= 2) //if has things oher than coins
+  else                                         //we need at least 2 spaces always.
+    Result := (Inventory.CountEmptySlots >= 2) or
+                (Inventory.ContainsItem(CoinPouch) and
+                 Inventory.ContainsItem('Coins')
+                 and not Inventory.ContainsAny(DropArray));
+end;
+
+function TThiever.IsLowHP(): Boolean;
+begin
+  if Self.NextHeal < 1 then
+  begin
+    Self.NextHeal := MinHealth + Random(-Self.MaxHit, Self.MaxHit) * Round(Antiban.GetUniqueNumber(2, 0, 4));
+    Self.NextHeal := EnsureRange(Self.NextHeal, Self.MaxHit, Round(BaseStats.GetCurrentLevel(ERSSkill.HITPOINTS) * 0.8));
+  end;
+
+  Result := Minimap.GetHPLevel() <= Self.NextHeal;
+end;
+
+function TThiever.IsPouchFull(): Boolean;
+begin
+  if Self.CoinPouchLimit < 1 then
+    Self.CoinPouchLimit := SRL.TruncatedGauss(28 * DiaryLevel, 1);
+
+  Result := Inventory.CountItemStack(Self.CoinPouch) >= Self.CoinPouchLimit;
+end;
+
+
+function TThiever.CheckFailed(startingHP: Int32): Boolean;
+var
+  hasHitSplat: Boolean;
+  currentHP: Int32 := Minimap.GetHPLevel();
+begin
+  hasHitSplat := not Self.RenderDisabled and
+                (MainScreen.FindHitsplats(MainScreen.GetPlayerBox()) <> []);
+
+  Result := (currentHP < startingHP) or hasHitSplat;
+
+  if Result then
+  begin
+    if HasHitSplat then
+    begin
+      //Options.RenderSelf();
+      Self.RenderDisabled := True;
+    end
+    else
+      if SRL.Dice(45.0) or (Inventory.CountItem(Self.CoinPouch) > 49) then
+        Self.OpenCoinPouch()
+  end;
+end;
+
+function TThiever.NecklaceExpired(): Boolean;
+begin
+  //Color: CTS2(10617055, 7, 1.94, 0.01)
+  Result := Chat.FindMessage('crumbles', [CHAT_COLOR_LIGHT_RED]);
+  if Result then
+    Write("Crumbled");
+
+  HasNeck := not Result;
+end;
+
+function TThiever.Dodged(): Boolean;
+begin
+  Result := Chat.FindMessage('dodgy');
+end;
+
+
+function TThiever.OpenCoinPouch(): Boolean;
+var
+  pouchCount: Int32;
+begin
+  pouchCount := Inventory.CountItemStack(Self.CoinPouch);
+  if Inventory.ClickItem(Self.CoinPouch) then
+  begin
+    Wait(600);
+    Result := WaitUntil(not Inventory.ContainsItem(Self.CoinPouch), 100, 2000);
+  end;
+
+  if Result then
+  begin
+    Self.CoinPouchLimit := SRL.TruncatedGauss(28 * DiaryLevel, 1);
+    Self.TotalActions += pouchCount;
+    Self.TotalProfit += pouchCount * Self.ActionProfit;
+    WL.Activity.Restart();
+  end;
+end;
+
+function TThiever.Heal(): Boolean;
+var
+  oldHP, newHP, hpLevel: Int32;
+begin
+  newHP := Minimap.GetHPLevel();
+  hpLevel := BaseStats.GetCurrentLevel(ERSSkill.HITPOINTS) - 1;
+  repeat
+    oldHP := newHP;
+    if not Inventory.Consume(FOOD_CONSUMABLE) then
+      Exit;
+
+    newHP := Minimap.GetHPLevel();
+    Result := newHP > Random(oldHP, hpLevel);
+  until Result;
+
+  if Result then
+    Self.NextHeal := 0; //This will be reset when TThiever.IsLowHP() is called.
+end;
+
+function TThiever.HealToFull(): Boolean;
+var
+  oldHP, newHP, hpLevel: Int32;
+begin
+  newHP := Minimap.GetHPLevel();
+  hpLevel := BaseStats.GetCurrentLevel(ERSSkill.HITPOINTS) - 1;
+  repeat
+    oldHP := newHP;
+    if not Inventory.Consume(FOOD_CONSUMABLE) then
+      Exit;
+
+    newHP := Minimap.GetHPLevel();
+    Result := newHP > 91;
+  until Result;
+end;
+
+function TThiever.EquipNeck(): Boolean;
+begin
+  if Result := Inventory.ClickItem(Necklace) then Wait(300, 400);
+
+  FreshNeck := HasNeck := Result;
+end;
+
+function TThiever.CheckNeck(): Boolean;
+begin
+  Result := HasNeck := Equipment.ContainsItem(Necklace);
+
+  NeckTimer.Restart(Random(-30000, 60000));
+end;
+
+
+function TThiever.CastShadowVeil(): Boolean;
+begin
+  // Shadow Veil Message Color: CTS2(12517480, 1, 0.01, 0.01)
+  if not UseShadowVeil or not Magic.Open then
+    Exit;
+
+  if SRL.Dice(45.00) then
+    GameTabs.FKeyOpen(ERSGameTab.MAGIC);
+
+  if not Magic.CanActivate(ERSSpell.SHADOW_VEIL) then
+  begin
+    Result := UseShadowVeil := False;
+    Exit(False);
+  end;
+
+  Wait(600, 1200);
+  Result := Magic.CastSpell(ERSSpell.SHADOW_VEIL);
+  ShadowVeilTimer.Restart(Random(-5000, 5000));
+end;
+
+function TThiever.PickNPC(): Boolean;
+var
+  Slot: Int32 := Inventory.GetSelectedSlot;
+  CurrentHP: Int32 := Minimap.GetHPLevel;
+begin
+  if Slot > -1 then Inventory.ClickSlot(Slot);
+
+  if Result := Elf.SelectOption(['Pick', 'pocket']) then
+  begin
+    Minimap.WaitPlayerMoving(300, 10000);
+
+    RSObjects.Gravestone.Coordinates.Insert(Self.RSW.GetMyPos, 0);
+    if Length(RSObjects.Gravestone.Coordinates) > 4 then
+      RSObjects.Gravestone.Coordinates.Pop;
+
+    if not Self.NecklaceExpired then
+      FreshNeck := False;
+
+    Self.CheckFailed(CurrentHP);
+    WL.Activity.Restart();
+  end;
+end;
+
+function TThiever.WalkToNpc(): Boolean;
+var
+  Path: TPointArray;
+begin
+  // Door Handle: CTS2(2790076, 6, 0.51, 1.79)
+  // Door glass:  CTS2(6974070, 1, 26.39, 0.05)
+
+  MiniMap.SetCompassAngle(25.0, 20.0);
+  WriteLn("Angle: " + ToStr(MiniMap.GetCompassAngle()));
+
+  WriteLn("Walking to NPC");
+  Result := Self.RSW.WalkBlind(NPCTile, 10);
+end;
+
+function TThiever.WalkToBank(): Boolean;
+var
+  myPos: TPoint := Self.RSW.GetMyPos();
+  ReachedBank: Boolean;
+  Path: TPointArray;
+begin
+
+  if Self.IsLowHP() then
+    Wait(2000, 3000);
+
+  MiniMap.SetCompassAngle(235.0, 20.0);
+  WriteLn("Angle: " + ToStr(MiniMap.GetCompassAngle()));
+
+  if myPos.DistanceTo([3879, 2118]) >= 15 then
+  begin
+    WriteLn("Walk to Bank");
+    ReachedBank := Self.RSW.WalkBlind(BankTile, 10);
+    if ReachedBank then
+      begin
+      WriteLn("Reached Bank");
+      Result := Bank.WalkOpen();
+      WriteLn("Walk Open");
+      end
+    else
+      begin
+      WriteLn("Couldnt open bank");
+      Result := False;
+      end;
+  end
+  else
+    begin
+    WriteLn("Coords are closer than 15");
+    Result := Bank.WalkOpen();
+    end
+
+  if MainScreen.IsUpText("Climb") then
+    begin
+      WriteLn("Climb detected GTFO");
+      Antiban.RandomMouse();
+      Antiban.RandomRotate();
+    end;
+
+  //Result := Bank.WalkOpen();
+end;
+
+function TThiever.Deposit(): Boolean;
+var
+  ItemCount: Int32;
+begin
+  if ToStr(ValuableItem) <> '' then
+    ItemCount := Inventory.CountItem(ValuableItem);
+  Result := Bank.DepositItems(Self.BankArray, True);
+  if ItemCount > 0 then
+  begin
+    if Inventory.CountItem(ValuableItem) = 0 then
+      TotalProfit += (ItemCount * ValuableItemValue);
+  end;
+end;
+
+function TRSInventory.Consume(consumableType: ERSConsumable; out slots: TIntegerArray): Boolean; override;
+var
+  consumableHandler: PConsumableHandler := TConsumableHandler.GetHandler(consumableType);
+  foundConsumables: TRSConsumableArray;
+  startingPoints: Int32;
+  trashSlots: TIntegerArray;
+begin
+  if not consumableHandler^.IsSetup then
+    Exit;
+
+  case consumableType of
+    ERSConsumable.FOOD_CONSUMABLE:
+      startingPoints := Minimap.GetHPLevel();
+
+    ERSConsumable.PRAYER_CONSUMABLE:
+      startingPoints := Minimap.GetPrayerLevel();
+
+    ERSConsumable.ENERGY_CONSUMABLE:
+      startingPoints := Minimap.GetRunEnergy();
+  end;
+
+  slots := Self.FindConsumable(consumableType, foundConsumables);
+
+  if slots.Len() = 0 then
+    Exit;
+
+  if not Antiban.BioDice(EBioBehavior.CONSUME_IN_BANK) and
+     MainScreen.HasInterface() then
+     MainScreen.CloseInterface();
+
+  if (consumableHandler^.ConsumableDelay.Length > 0) then
+    while not consumableHandler^.ConsumableDelay.IsFinished() do
+      Wait(50, 100);
+
+  if Bank.IsOpen() then
+    Result := Self.ShiftDrop(slots)
+  else
+    Result := Self.ClickSlot(slots[0], ['Eat', 'Drink']);
+
+  if Result then
+    case consumableType of
+      ERSConsumable.FOOD_CONSUMABLE:
+        Result := WaitUntil(startingPoints < Minimap.GetHPLevel(), 100, 3000);
+
+      ERSConsumable.PRAYER_CONSUMABLE:
+        Result := WaitUntil(startingPoints < Minimap.GetPrayerLevel(), 100, 3000);
+
+      ERSConsumable.ENERGY_CONSUMABLE:
+        Result := WaitUntil(startingPoints < Minimap.GetRunEnergy(), 100, 3000);
+      else
+        BioWait(1000, 2000, wdLeft);
+    end;
+
+  if Result then
+  begin
+    case consumableType of
+      ERSConsumable.FOOD_CONSUMABLE:
+        begin
+          if foundConsumables[0].Item = 'Cooked karambwan' then
+            consumableHandler^.ConsumableDelay.Init(1200)
+          else
+            consumableHandler^.ConsumableDelay.Init(1800);
+        end;
+      else
+        consumableHandler^.ConsumableDelay.Init(600);
+    end;
+
+    if foundConsumables[0].Timer > 0 then
+    begin
+      if consumableHandler^.Timer.Length <> foundConsumables[0].Timer then
+        consumableHandler^.Timer.Setup(foundConsumables[0].Timer);
+
+      if consumableType = ERSConsumable.ANTI_FIRE_CONSUMABLE then
+        consumableHandler^.Timer.Restart(Random(-50000, -20000))
+      else
+        consumableHandler^.Timer.Restart(Random(-3000, 3000));
+    end;
+
+    TotalConsumableCost += foundConsumables[0].Cost;
+
+    if Self.FindItems(TRASH_ARRAY, trashSlots) then
+    begin
+      if Bank.IsOpen() then
+        //Bank.DepositSlot([trashSlots[0], -1], False)
+      else
+        Self.ShiftDrop(trashSlots.Intersection(Self.RandomPattern()));
+
+      slots := slots.Difference(trashSlots); //Delete trashSlots from slots.
+    end;
+  end;
+end;
+
+function TRSWalker.IsWalkable(WorldPoint: TPoint; PlayerPoint: TPoint; Angle: Double): Boolean; override;
+var
+  MinimapPoint: TPoint;
+  B: TBox;
+begin
+  if Inventory.GetSelectedSlot >= 0 then
+    ChooseOption.Select('Cancel');
+
+  MinimapPoint := Self.WorldToMM(PlayerPoint, WorldPoint, Angle);
+
+  case Self.ScreenWalk of
+    True:
+      begin
+        B := Minimap.PointToMSRect(MinimapPoint, Angle).Bounds;
+        Result := MainScreen.IsVisible(B.Middle);
+      end;
+
+    False: Result := Minimap.IsPointOn(MinimapPoint, -1);
+  end;
+
+end;
+
+function TRSWalker.WalkPath(Path: TPointArray; WaitUntilDistance: Int32 = 0): Boolean; override;
+  function BuildPath(TPA: TPointArray): TPointArray;
+  var
+    i,j: Int32;
+    Line: TPointArray;
+  begin
+    if EXPERIMENTALWALK then
+    begin
+      for i := 1 to High(TPA) do
+        Result += TPABetweenPoints(TPA[i-1], TPA[i], 15 + Random(-7,7), 7);
+    end else
+    begin
+      for I := 1 to High(TPA) do
+      begin
+        Line := TPAFromLine(TPA[I-1], TPA[I]);
+
+        J := 0;
+        while J < High(Line) do
+        begin
+          Result += Line[J];
+
+          // keep the steps low, as mainscreen walking might just have a few tiles visible when NearZoomMode is set True
+          if (Self.NearZoomMode) and ((Self.ScreenWalk) or (Self.AdaptiveWalk)) then
+            Inc(J, Random(1, 4))
+          else
+            Inc(J, Random(3, 12));
+        end;
+      end;
+
+      Result += TPA[High(TPA)];
+    end;
+  end;
+
+  function AdvancePath(var Index: Int32; PlayerPoint: TPoint): Boolean;
+  var
+    Angle: Double := Minimap.GetCompassAngle(False);
+    Previous: Int32 := Index;
+    Nearest, Furthest: Int32;
+  begin
+    Nearest := Self.Path.Find(Self.Path.Sorted(PlayerPoint)[0]);
+    Self.PathIndex := Nearest;
+
+    while (Nearest < High(Self.Path)) and (not Self.IsWalkable(Self.Path[Nearest+1], PlayerPoint, Angle)) do
+      Inc(Nearest);
+
+    Furthest := Nearest;
+    while (Furthest < High(Self.Path)) and Self.IsWalkable(Self.Path[Furthest+1], PlayerPoint, Angle) do
+      Inc(Furthest);
+
+    Index := Furthest;
+
+    // do the result check before randomness to avoid false error
+    Result := (Index > Previous);
+
+    // 15% chance of randomness else furthest
+    if Random() < 0.15 then
+      Index := Random(Nearest, Furthest);
+  end;
+
+var
+  PlayerPoint: TPoint;
+  Index, Fails: Int32;
+begin
+  Self.Enabled := True;
+  PlayerPoint  := Self.GetMyPos();
+  Self.Path    := BuildPath([PlayerPoint] + Path);
+
+  if Self.AdaptiveWalk then
+  begin
+    Self.AdaptiveToggleDistances.X := RSW_ADAPTIVE_SCREEN_TOGGLE_DISTANCES.X + Random(-6,6);
+    Self.AdaptiveToggleDistances.Y := RSW_ADAPTIVE_SCREEN_TOGGLE_DISTANCES.Y + Random(-16,16);
+    Self.AdaptiveWalkCheck(PlayerPoint);
+  end;
+
+  while Self.Enabled and (Fails < 10) do
+  begin
+    PlayerPoint := Self.GetMyPos();
+
+    if AdvancePath(Index, PlayerPoint) then
+      Fails := 0
+    else
+    begin
+      Inc(Fails);
+
+      // Likely haven't moved far enough to advance to next point
+      if (Fails < 5) then
+      begin
+        Wait(300);
+        Continue;
+      end else begin
+        // screen walking struggles, so disable it
+        if Self.AdaptiveWalk then
+          Self.ScreenWalk := False
+        else if (Fails = 5) then
+          case SRL.Dice(50) of
+            True:  Minimap.SetCompassAngle(Minimap.GetCompassAngle() - SRL.TruncatedGauss(30, 360, 3));
+            False: Minimap.SetCompassAngle(Minimap.GetCompassAngle() + SRL.TruncatedGauss(30, 360, 3));
+          end;
+      end;
+
+      if (Fails mod 2 = 0) then
+        Minimap.WaitFlag();
+    end;
+
+    if Distance(PlayerPoint, Self.Path[Index]) <= 20 then // The next step is very close, let's just MS walk
+      Self.ScreenWalk := True;
+
+    if Index = High(Self.Path) then
+    begin
+      if Self.WalkFinalStep(PlayerPoint, Self.Path[Index], WaitUntilDistance) then
+        Exit(True);
+    end else
+      Self.WalkStep(PlayerPoint, Self.Path[Index]);
+  end;
+
+  if Fails = 10 then
+    Self.DebugLn('Failed to advance path');
+end;
+
+function TThiever.GetState(): EThieverState;
+begin
+  if WL.Activity.IsFinished() then
+    Exit(END_SCRIPT);
+
+  if not Minimap.OnGroundLevel() then
+  begin
+    Logout.ClickLogout();
+    Exit(END_SCRIPT);
+  end;
+
+  if ChooseOption.IsOpen() then
+    Exit(CLOSE_CONTEXT);
+
+  if MainScreen.HasInterface() then
+  begin
+    if Bank.IsOpen() then
+    begin
+      // added bankarray so loot is banked every bank trip
+      if Inventory.ContainsAny(Self.BankArray) then
+        Exit(DEPOSIT_LOOT);
+
+      // failsafe copied from ardy knight script
+      if Inventory.IsFull() then
+      begin
+        if (Inventory.CountItem(Self.Necklace) < (NeckAmount-2)) or
+           not Inventory.HasEnoughConsumable(FOOD_CONSUMABLE) then
+        begin
+          Bank.DepositAll();
+        end;
+
+        Bank.DepositItem([Self.Necklace, -1], False);
+        Bank.DepositItem(['Jug of wine', -1], False);
+
+        Exit(WAIT_STATE);
+      end;
+
+      // copied from ardy knight script. idk wtf it does
+      case Inventory.CountItem(Self.Necklace) of
+        0..(NeckAmount-2): Exit(WITHDRAW_NECKLACES);
+        (NeckAmount-2)..(NeckAmount+2): ;
+        else Exit(DEPOSIT_NECK);
+      end;
+
+      // withdraws food
+      if not Inventory.HasEnoughConsumable(FOOD_CONSUMABLE) then
+        Exit(WITHDRAW_FOOD);
+
+      // eats to full if hp is lower than number
+      if Minimap.GetHPLevel < 77 then
+        Exit(HEAL_TO_FULL);
+
+      // deposits left over food from eating to full to withdraw 10 more rather than taking off with the left over amt
+      if Inventory.CountConsumable(FOOD_CONSUMABLE) < 10 then
+        Exit(DEPOSIT_FOOD);
+
+    end;
+
+    Exit(CLOSE_INTERFACE);
+  end;
+
+  if Self.IsPouchFull then
+    Exit(OPEN_POUCH);
+
+  if ChatButtons.GetState(ERSChatButton.GAME_CHAT) <> ERSChatButtonState.ENABLED then
+    Exit(CHANGE_CHAT_FILTER);
+
+  if not ChatButtons.IsActive(ERSChatButton.GAME_CHAT) then
+    Exit(OPEN_CHAT);
+
+  if NeckTimer.IsFinished() then
+    Exit(CHECK_NECKLACE);
+
+  if Self.HasRogue() then
+    Exit(EQUIP_ROGUE);
+
+  if not Self.HasSpace() then
+  begin
+    if Inventory.ContainsAny(DropArray) then
+      Exit(DROP_ITEMS);
+    if Inventory.FindConsumable(FOOD_CONSUMABLE) then
+      Exit(EAT_FOOD);
+
+    Exit(OPEN_BANK);
+  end;
+
+  if (NeckAmount > 0) and not FreshNeck and (not HasNeck or Self.NecklaceExpired) then
+  begin
+    if Inventory.ContainsItem(Necklace) then
+      Exit(EQUIP_NECKLACE);
+
+    Exit(OPEN_BANK);
+  end;
+
+  if Self.IsLowHP then
+  begin
+    if Inventory.ContainsConsumable(FOOD_CONSUMABLE) then
+      Exit(EAT_FOOD);
+    if not Inventory.ContainsConsumable(FOOD_CONSUMABLE) then
+      Exit(OPEN_BANK);
+    if not Self.RSW.AtTile(Elf.Coordinates, 20) then
+      Exit(WALK_TO_NPC);
+    if UseShadowVeil and ShadowVeilTimer.IsFinished() then
+      Exit(CAST_SHADOW_VEIL);
+
+    Exit(PICKPOCKET);
+  end;
+
+  if not Self.RSW.AtTile(Elf.Coordinates, 20) then
+    Exit(WALK_TO_NPC);
+
+  if UseShadowVeil and ShadowVeilTimer.IsFinished() then
+    Exit(CAST_SHADOW_VEIL);
+
+  Exit(PICKPOCKET);
+end;
+
+procedure TThiever.Run(maxActions: Int32; maxTime: Int64);
+begin
+  Self.Init(maxActions, maxTime);
+
+  repeat
+    State := Self.GetState();
+    Self.SetAction(ToStr(State));
+    //Debug(MainScreen.FindObject(Elf.Finder));
+
+    case State of
+      OPEN_BANK: Self.WalkToBank();
+      DEPOSIT_LOOT: Self.Deposit();
+      WITHDRAW_FOOD: Bank.WithdrawConsumable(FOOD_CONSUMABLE);
+      WITHDRAW_NECKLACES: Self.Withdraw([Necklace, 2, False]);
+      DEPOSIT_NECK: Bank.DepositItem([Necklace, -1], False);
+      DEPOSIT_FOOD: Bank.DepositItem(['Jug of wine', -1], False);
+      CLOSE_INTERFACE: MainScreen.CloseInterface();
+
+      OPEN_CHAT: ChatButtons.Open(ERSChatButton.GAME_CHAT);
+      CHANGE_CHAT_FILTER: ChatButtons.ChangeState(ERSChatButton.GAME_CHAT, ERSChatButtonState.ENABLED);
+
+      CAST_SHADOW_VEIL: Self.CastShadowVeil();
+      PICKPOCKET: Self.PickNPC();
+      OPEN_POUCH: Self.OpenCoinPouch();
+
+      EAT_FOOD: Self.Heal();
+      HEAL_TO_FULL: Self.HealToFull();
+      EQUIP_NECKLACE: Self.EquipNeck();
+      CHECK_NECKLACE: Self.CheckNeck();
+      CLOSE_CONTEXT: ChooseOption.Close();
+      DROP_ITEMS: Inventory.ShiftDrop(Self.DropArray, Inventory.RandomPattern);
+      WALK_TO_NPC: Self.WalkToNpc();
+      EQUIP_ROGUE: Self.EquipRogue();
+
+      END_SCRIPT: Break;
+    end;
+
+    Self.DoAntiban();
+  until Self.ShouldStop();
+end;
+
+var
+  Thiever: TThiever;
+
+function TConsumableHandler.FindInBank(): TRSConsumableArray; override;
+var
+  consumable: TRSConsumable;
+  item: TRSItem;
+begin
+  Self.DebugLn('Setting up consumable of type: ' + ToStr(Self.ConsumableType));
+
+  for item in GetConsumableArray(Self.ConsumableType) do
+  begin
+    if Self.ConsumableArray.Contains(item) then //avoid resetting items.
+      Continue;
+
+    if Bank.ContainsItem(item.Reorder(False)) then
+    begin
+      Self.DebugLn('Consumable found: ' + ToStr(item));
+      consumable := Self.Setup(item);
+      Thiever.StackableArray += item;
+      Result += consumable;
+    end;
+  end;
+end;
+
+function TConsumableHandler.FindInInventory(): TRSConsumableArray; override;
+var
+  consumable: TRSConsumable;
+  item: TRSItem;
+begin
+  Self.DebugLn('Setting up consumable of type: ' + ToStr(Self.ConsumableType));
+
+  for item in GetConsumableArray(Self.ConsumableType) do
+  begin
+    if Self.ConsumableArray.Contains(item) then //avoid resetting leftover items.
+      Continue;
+
+    if Inventory.ContainsItem(item) then
+    begin
+      Self.DebugLn('Consumable found: ' + ToStr(item));
+      consumable := Self.Setup(item);
+      Thiever.StackableArray += item;
+      Result += consumable;
+    end;
+  end;
+end;
+
+function TRSChooseOption.Select(Text: TStringArray; MouseAction: Int32 = MOUSE_LEFT; CaseSensitive: Boolean = True; CloseIfNotFound: Boolean = True): Boolean; override;
+var
+  Choices: TRSChooseOption_OptionArray;
+  I, J: Int32;
+begin
+  if not Self.Open then
+    Exit;
+
+  Wait(0, 1000 - Round(1000*BioHash), wdLeft);
+
+  Choices := Self.GetOptions;
+
+  for I := 0 to High(Choices) do
+    for J := 0 to High(Text) do
+      if (CaseSensitive and (Text[J] in Choices[I].Text)) or
+         ((not CaseSensitive) and (Lowercase(Text[J]) in Lowercase(Choices[I].Text))) then
+      begin
+        Self.Select(Choices[I], MouseAction);
+        Exit(True);
+      end;
+
+  if CloseIfNotFound then
+  begin
+    WaitEx(350 - Round(350*BioHash), 50);
+    Self.Close;
+  end;
+
+end;
+
+function TRSInventory.HasEnoughConsumable(ConsumableType: ERSConsumable): Boolean; override;
+begin
+  Result := Self.CountPoints(ConsumableType) >= FoodHandler.Amount;
+end;
+
+
+{$IFDEF SCRIPT_GUI}
+type
+  TThieverConfig = record(TScriptForm)
+    DiaryLevelSelector: TLabeledComboBox;
+    NeckAmountEdit: TLabeledEdit;
+  end;
+
+procedure TThieverConfig.StartScript(sender: TObject); override;
+var
+  foodAmountEdit, minHealthEdit: TEdit;
+begin
+  foodAmountEdit := Self.Form.GetChild('cm_food_amount_edit');
+  minHealthEdit  := Self.Form.GetChild('cm_food_minimum_edit');
+
+  DiaryLevel := Self.DiaryLevelSelector.GetItemIndex() + 1;
+  FoodAmount := StrToInt(foodAmountEdit.GetText());
+  NeckAmount := StrToInt(Self.NeckAmountEdit.GetText());
+  MinHealth  := StrToint(minHealthEdit.GetText());
+
+  inherited;
+end;
+
+function TScriptForm.CreateConsumableSettings(owner: TControl; consumableType: ERSConsumable; addInfo: Boolean = True): TPanel; override;
+var
+  typeStr: String;
+  consumableAmount: TLabeledEdit;
+  fullWidth, w, space, y: Int32;
+begin
+  fullWidth := Floor(Self.Size.X/3);
+  space := Floor(fullWidth * 0.1);
+  w := Floor(fullWidth - space * 2);
+  if addInfo then
+    y := Floor(Self.Size.Y/2.5)
+  else
+    y := TControl.AdjustToDPI(15);
+
+  case consumableType of
+    FOOD_CONSUMABLE:   typeStr := 'Food';
+    PRAYER_CONSUMABLE: typeStr := 'Prayer';
+    ENERGY_CONSUMABLE: typeStr := 'Energy';
+    BOOST_CONSUMABLE:  typeStr := 'Boost';
+  end;
+
+  Result := inherited;
+
+  with consumableAmount do
+  begin
+    Create(Result);
+    SetCaption('Withdraw ' + LowerCase(typeStr) + ' amount:');
+    SetName('cm_' + typeStr + '_amount');
+    SetLeft(fullWidth * 2 + space);
+    SetTop(y);
+    SetWidth(w);
+    SetText('8');
+    Edit.setOnKeyPress(@Edit.NumberField);
+  end;
+end;
+
+
+procedure TThieverConfig.Run(); override;
+var
+  tab: TTabSheet;
+  panel: TPanel;
+  foodAmountEdit, minHealthEdit: TEdit;
+begin
+  Self.Setup("Khaos Priffpockter");
+  Self.Start.setOnClick(@Self.StartScript);
+
+  Self.AddTab('Script Settings');
+  tab := Self.Tabs[High(Self.Tabs)];
+
+  Self.CreateAccountManager(tab);
+
+  with Self.DiaryLevelSelector do
+  begin
+    Create(tab);
+    SetCaption('Ardougne diaries completed:');
+    SetLeft(TControl.AdjustToDPI(30));
+    SetTop(TControl.AdjustToDPI(180));
+    SetStyle(csDropDownList);
+    AddItemArray(['None/Easy diary', 'Medium diary', 'Hard diary', 'Elite diary']);
+    SetItemIndex(DiaryLevel - 1);
+  end;
+
+  with Self.NeckAmountEdit do
+  begin
+    Create(tab);
+    SetCaption('Necklaces amount:');
+    SetLeft(Self.DiaryLevelSelector.GetRight() + TControl.AdjustToDPI(30));
+    SetTop(Self.DiaryLevelSelector.GetTop());
+    SetWidth(TControl.AdjustToDPI(120));
+    SetText(ToStr(NeckAmount));
+  end;
+
+  panel := Self.CreateConsumableSettings(tab, FOOD_CONSUMABLE, False);
+
+  panel.SetTop(TControl.AdjustToDPI(300));
+
+  foodAmountEdit := panel.GetChild('cm_food_amount_edit');
+  minHealthEdit  := panel.GetChild('cm_food_minimum_edit');
+
+  foodAmountEdit.SetText(ToStr(FoodAmount));
+  foodAmountEdit.SetVisible(True);
+  minHealthEdit.SetText(ToStr(MinHealth));
+
+  Self.CreateVersionPanel(tab);
+  Self.CreateAntibanManager();
+  Self.CreateWaspLibSettings();
+  Self.CreateAPISettings();
+
+  inherited;
+end;
+
+var
+  ThieverConfig: TThieverConfig;
+{$ENDIF}
+
+begin
+  {$IFDEF SCRIPT_GUI}
+  ThieverConfig.Run();
+  {$ENDIF}
+  Thiever.Run(WLSettings.MaxActions, WLSettings.MaxTime);
+end.

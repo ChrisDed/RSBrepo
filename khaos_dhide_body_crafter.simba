@@ -1,0 +1,345 @@
+{$DEFINE SCRIPT_ID := ''}
+{$DEFINE SCRIPT_REVISION := '1'}
+{$DEFINE SCRIPT_GUI}
+{$I SRL-T/osr.simba}
+{$I WaspLib/osr.simba}
+
+begin
+  Login.PlayerIndex := 0;
+  StatsPayload.SetUsername('');
+end;
+
+type
+  ERSHideType = (
+    GREEN, BLUE, RED, BLACK
+  );
+
+var
+  CurrentBody: ERSHideType := ERSHideType.GREEN;
+  ActionXp: Int32;
+
+type
+  ECraftingState = (
+    OPEN_BANK,
+    WITHDRAW_LEATHER,
+    DEPOSIT_BODIES,
+
+    OPEN_COLLECT,
+    HANDLE_COLLECT,
+    CLOSE_INTERFACE,
+
+    WAIT_CRAFTING,
+    HANDLE_CRAFTING,
+    MAKE_BODIES,
+
+    LEVEL_UP,
+    CLOSE_CONTEXT,
+
+    OUT_OF_HIDES,
+    END_SCRIPT
+  );
+
+  TBodyCrafter = record(TBaseBankScript)
+    State: ECraftingState;
+
+    Needle, Thread, Leather, Body: TRSItem;
+    isCrafting, hasNeedle, hasThread: Boolean;
+    makeName: String;
+  end;
+
+procedure TAntiban.Setup(); override;
+begin
+  Self.Skills := [ERSSkill.CRAFTING, ERSSkill.TOTAL];
+  Self.MinZoom := 60;
+  Self.MaxZoom := 85;
+
+  inherited;
+end;
+
+procedure TBodyCrafter.Init(maxActions: Int32; maxTime: Int64); override;
+var
+  leatherPrice, bodyPrice: Int32;
+begin
+  inherited;
+
+  Self.RSW.SetupNamedRegion();
+  Self.Needle := 'Needle';
+  Self.Thread := 'Thread';
+
+  case CurrentBody of
+    ERSHideType.GREEN:
+      begin
+        Self.Leather := "Green dragon leather";
+        Self.Body := "Green d'hide body";
+        Self.makeName := 'Green dragonhide body';
+        ActionXp := 186;
+      end;
+    ERSHideType.BLUE:
+      begin
+        Self.Leather := 'Blue dragon leather';
+        Self.Body := "Blue d'hide body";
+        Self.makeName := 'Blue dragonhide body';
+      end;
+    ERSHideType.RED:
+      begin
+        Self.Leather := 'Red dragon leather';
+        Self.Body := "Red d'hide body";
+        Self.makeName := 'Red dragonhide body';
+        ActionXp := 234;
+      end;
+    ERSHideType.BLACK:
+      begin
+        Self.Leather := 'Black dragon leather';
+        Self.Body := "Black d'hide body";
+        Self.makeName := 'Black dragonhide body';
+      end;
+  end;
+
+  leatherPrice := ItemData.GetAverage(Self.Leather);
+  bodyPrice := ItemData.GetAverage(Self.Body);
+
+  Self.ActionProfit := bodyPrice - (leatherPrice * 3);
+
+  ProgressReport.BGImg.Init();
+  ProgressReport.TopLeft := [Chat.Bounds().X1, Chat.Bounds().Y1 - 12];
+  ProgressReport.BGImg.LoadFromFile(AppPath + '\Resources\khaosbg.png');
+  ProgressReport.BGImg.setFontAntialiasing(True);
+  ProgressReport.ClientImg := RSClient.Image();
+  ProgressReport.TextColor := $90A301;
+
+  ProgressReport.ClientImg.Clear();
+  ProgressReport.ClientImg.SetName('ClientImg');
+  ProgressReport.ClientImg.setFontAntialiasing(True);
+  ProgressReport.ClientImg.setFontSize(13);
+end;
+
+function TBaseScript.BuildTextReport(): TStringArray; override;
+begin
+  if Self.Action = Self.PreviousAction then
+      Exit;
+
+  Self.DebugLn(Self.Action, Self.ExtraInfo);  //add action and extra info the the log.
+
+  Result += ' Action        : ' + Self.Action;
+
+  Result += ' Runtime       : ' + SRL.MsToTime(Self.TimeRunning.ElapsedTime(), Time_Short).Trim();
+
+  Result += ' Total Actions : ' + ToStr(Self.TotalActions);
+  if Self.ActionLimit > -1 then
+    Result[High(Result)] += '/' + ToStr(Self.ActionLimit);
+
+  Result += ' Actions/Hour  : ' + ToStr(NumberPerHour(Self.TotalActions, Self.TimeRunning.ElapsedTime()));
+
+  Result += ' Total Exp     : ' + SRL.FormatNumber(ActionXp * Self.TotalActions);
+  Result += ' Exp/Hour      : ' + SRL.FormatNumber(ActionXp * NumberPerHour(Self.TotalActions, Self.TimeRunning.ElapsedTime()), 2);
+
+  Result += ' Total Profit  : ' + SRL.FormatNumber(Self.TotalProfit, 2);
+  Result += ' Profit/Hour   : ' + SRL.FormatNumber(NumberPerHour(Self.TotalProfit, Self.TimeRunning.ElapsedTime()), 2);
+
+  Result += 'This is probably gonna get you banned mate';
+end;
+
+function TBodyCrafter.Deposit(item: TRSItem): Boolean;
+var
+  count: Int32;
+begin
+  count := Inventory.CountItem(item);
+
+  if Bank.DepositItem(item, True) then
+    Result := WaitUntil(not Inventory.ContainsItem(item), 300, 5000);
+
+  Self.TotalActions += count;
+  Self.TotalProfit += count * Self.ActionProfit;
+end;
+
+function TBodyCrafter.CraftBodies(item: TRSItem): Boolean;
+begin
+  if Inventory.Use(Self.Needle, item) then
+    Result := Make.IsOpen(5000);
+end;
+
+function TBodyCrafter.HandleMake(item: TRSItem): Boolean;
+var
+  count: Int32;
+begin
+  count := Inventory.CountItem(item);
+  if Make.Select(Self.makeName, MAKE_QUANTITY_ALL) then
+    Result := WaitUntil(Inventory.CountItem(item) < count, 300, 8000);
+
+  Self.isCrafting := Result;
+end;
+
+function TBodyCrafter.WaitCrafting(item: TRSItem): Boolean;
+var
+  t: Int64;
+  stop: Boolean;
+begin
+  t := GetTickCount();
+
+  repeat
+    if Inventory.CountItem(item) < 3 then
+    begin
+      Self.isCrafting := False;
+      Break;
+    end;
+
+    stop := XPBar.EarnedXP();
+  until stop or (GetTickCount() > (t + 8000));
+
+  Self.isCrafting := stop;
+
+  Result := stop;
+end;
+
+function TBodyCrafter.GetState(): ECraftingState;
+begin
+  if WL.Activity.IsFinished() then
+    Exit(END_SCRIPT);
+
+  if Chat.LeveledUp() then
+  begin
+    Self.isCrafting := False;
+    EXIT(ECraftingState.LEVEL_UP);
+  end;
+
+  if Self.isCrafting then
+    EXIT(ECraftingState.WAIT_CRAFTING);
+
+  if Make.IsOpen() then
+    EXIT(ECraftingState.HANDLE_CRAFTING);
+
+  if MainScreen.HasInterface() then
+  begin
+    if Bank.IsOpen() then
+    begin
+      if Inventory.ContainsItem(Self.Body) then
+        EXIT(ECraftingState.DEPOSIT_BODIES);
+
+      if not Inventory.IsFull() then
+      begin
+        if Self.BankEmpty then
+        begin
+          if Self.CollectEmpty then
+            EXIT(ECraftingState.OUT_OF_HIDES);
+
+          Exit(ECraftingState.OPEN_COLLECT);
+        end;
+
+        EXIT(ECraftingState.WITHDRAW_LEATHER);
+      end;
+      EXIT(ECraftingState.CLOSE_INTERFACE);
+    end;
+
+    if not Self.CollectEmpty and CollectBox.IsOpen() then
+      Exit(HANDLE_COLLECT);
+
+    Exit(CLOSE_INTERFACE);
+  end;
+
+  if Inventory.CountItem(Self.Leather) > 2 then
+    EXIT(ECraftingState.MAKE_BODIES);
+
+  if Self.BankEmpty then
+  begin
+    if Self.CollectEmpty then
+      EXIT(ECraftingState.OUT_OF_HIDES);
+
+    EXIT(ECraftingState.OPEN_COLLECT);
+  end;
+
+  if not Self.isCrafting then
+  begin
+    Wait(300,1400);
+    EXIT(ECraftingState.OPEN_BANK);
+  end;
+end;
+
+procedure TBodyCrafter.Run(maxActions: Int32; maxTime: Int64);
+begin
+  Self.Init(maxActions, maxTime);
+
+  repeat
+    Self.State := Self.GetState();
+    Self.SetAction(ToStr(Self.State));
+
+    case State of
+      ECraftingState.OPEN_BANK: Bank.WalkOpen();
+      ECraftingState.WITHDRAW_LEATHER: Self.Withdraw([Self.Leather, -1, False]);
+      ECraftingState.DEPOSIT_BODIES: Self.Deposit(Self.Body);
+
+      ECraftingState.OPEN_COLLECT: CollectBox.WalkOpen();
+      ECraftingState.HANDLE_COLLECT: Self.HandleCollectBox([Self.Leather, Self.Body]);
+      ECraftingState.CLOSE_INTERFACE: MainScreen.CloseInterface();
+
+      ECraftingState.WAIT_CRAFTING: Self.WaitCrafting(Self.Leather);
+      ECraftingState.MAKE_BODIES: Self.CraftBodies(Self.Leather);
+      ECraftingState.HANDLE_CRAFTING: Self.HandleMake(Self.Leather);
+
+      ECraftingState.LEVEL_UP: Chat.HandleLevelUp();
+      ECraftingState.CLOSE_CONTEXT: ChooseOption.Close();
+
+      ECraftingState.OUT_OF_HIDES, ECraftingState.END_SCRIPT: Break;
+    end;
+
+    Self.DoAntiban();
+  until Self.ShouldStop();
+end;
+
+var
+  BodyCrafter: TBodyCrafter;
+
+{$IFDEF SCRIPT_GUI}
+type
+  TBodyCrafterConfig = record(TScriptForm)
+    BodySelector: TLabeledCombobox;
+  end;
+
+procedure TBodyCrafterConfig.StartScript(Sender: TObject); override;
+begin
+  CurrentBody := ERSHideType(BodySelector.GetItemIndex());
+  inherited;
+end;
+
+procedure TBodyCrafterConfig.Run(); override;
+var
+  tab: TTabSheet;
+begin
+  Self.Setup('Khaos Dhide Body Crafter');
+  Self.Start.setOnClick(@Self.StartScript);
+
+  Self.AddTab('Script Settings');
+  tab := Self.Tabs[High(Self.Tabs)];
+
+  Self.CreateAccountManager(tab);
+
+  with Self.BodySelector do
+  begin
+    Create(tab);
+    SetCaption('Dhide Body:');
+    SetLeft(TControl.AdjustToDPI(40));
+    SetTop(TControl.AdjustToDPI(170));
+    SetStyle(csDropDownList);
+    AddItemArray(['Green', 'Blue', 'Red', 'Black']);
+    SetItemIndex(Ord(CurrentBody));
+  end;
+
+  Self.CreateVersionPanel(tab);
+
+  Self.CreateAntibanManager();
+  Self.CreateBankSettings();
+  Self.CreateWaspLibSettings();
+  Self.CreateAPISettings();
+
+  inherited;
+end;
+
+var
+  BodyCrafterConfig: TBodyCrafterConfig;
+{$ENDIF}
+
+begin
+  {$IFDEF SCRIPT_GUI}
+  BodyCrafterConfig.Run();
+  {$ENDIF}
+  BodyCrafter.Run(WLSettings.MaxActions, WLSettings.MaxTime);
+end.

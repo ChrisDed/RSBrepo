@@ -1,0 +1,309 @@
+{$DEFINE SCRIPT_ID := ''}
+{$DEFINE SCRIPT_REVISION := '1'}
+{$DEFINE SCRIPT_GUI}
+{$I SRL-T/osr.simba}
+{$I WaspLib/osr.simba}
+
+begin
+  Login.PlayerIndex := 0;
+  StatsPayload.SetUsername('');
+end;
+
+type
+  EWineState = (
+    OPEN_BANK,
+    WITHDRAW_SUPPLIES,
+    DEPOSIT_WINES,
+    MAKE_WINE,
+    HANDLE_MAKE,
+    WAIT_WINE,
+
+    OPEN_COLLECT,
+    HANDLE_COLLECT,
+    CLOSE_INTERFACE,
+    LEVEL_UP,
+    CLOSE_CONTEXT,
+
+    OUT_OF_SUPPLIES,
+    END_SCRIPT
+  );
+
+  TScript = record(TBaseBankScript)
+    State: EWineState;
+
+    Grape, Jug, Wine: TRSItem;
+    IsMaking: Boolean;
+    MakeName: String;
+    TotalXp, ActionXp: Int32;
+  end;
+
+procedure TAntiban.Setup(); override;
+begin
+  Self.Skills := [ERSSkill.Cooking, ERSSkill.TOTAL];
+  Self.MinZoom := 60;
+  Self.MaxZoom := 85;
+
+  inherited;
+end;
+
+procedure TScript.Init(maxActions: Int32; maxTime: Int64); override;
+var
+  GrapePrice, JugPrice, WinePrice: Int32;
+begin
+  inherited;
+
+  Self.RSW.SetupNamedRegion();
+  Mouse.Speed := Random(21,27);
+
+  Self.Grape := 'Grapes';
+  Self.Jug := 'Jug of water';
+  Self.Wine := 'Jug of wine';
+  Self.MakeName := 'Unfermented wine';
+  Self.IsMaking := False;
+
+  GrapePrice := ItemData.GetAverage(Self.Grape);
+  JugPrice := ItemData.GetAverage(Self.Jug);
+  WinePrice := ItemData.GetAverage(Self.Wine);
+  Self.ActionXp := 200;
+
+  Self.ActionProfit := WinePrice - (GrapePrice + JugPrice);
+
+  ProgressReport.BGImg.Init();
+  ProgressReport.TopLeft := [Chat.Bounds().X1, Chat.Bounds().Y1 - 12];
+  ProgressReport.BGImg.LoadFromFile(AppPath + '\Resources\khaosbg.png');
+  ProgressReport.BGImg.setFontAntialiasing(True);
+  ProgressReport.ClientImg := RSClient.Image();
+  ProgressReport.TextColor := $90A301;
+
+  ProgressReport.ClientImg.Clear();
+  ProgressReport.ClientImg.SetName('ClientImg');
+  ProgressReport.ClientImg.setFontAntialiasing(True);
+  ProgressReport.ClientImg.setFontSize(13);
+
+end;
+
+function TBaseScript.BuildTextReport(): TStringArray; override;
+begin
+  if Self.Action = Self.PreviousAction then
+      Exit;
+
+  Self.DebugLn(Self.Action, Self.ExtraInfo);  //add action and extra info the the log.
+
+  Result += ' Action        : ' + Self.Action;
+
+  Result += ' Runtime       : ' + SRL.MsToTime(Self.TimeRunning.ElapsedTime(), Time_Short).Trim();
+
+  Result += ' Total Actions : ' + ToStr(Self.TotalActions);
+  if Self.ActionLimit > -1 then
+    Result[High(Result)] += '/' + ToStr(Self.ActionLimit);
+
+  Result += ' Actions/Hour  : ' + ToStr(NumberPerHour(Self.TotalActions, Self.TimeRunning.ElapsedTime()));
+
+  Result += ' Total Exp     : ' + SRL.FormatNumber(200 * Self.TotalActions);
+  Result += ' Exp/Hour      : ' + SRL.FormatNumber(200 * NumberPerHour(Self.TotalActions, Self.TimeRunning.ElapsedTime()), 2);
+
+  Result += ' Total Profit  : ' + SRL.FormatNumber(Self.TotalProfit, 2);
+  Result += ' Profit/Hour   : ' + SRL.FormatNumber(NumberPerHour(Self.TotalProfit, Self.TimeRunning.ElapsedTime()), 2);
+
+  Result += 'This is probably gonna get you banned mate';
+end;
+
+function TScript.Deposit(): Boolean;
+var
+  count: Int32;
+begin
+  count := Inventory.CountItem(Self.Wine);
+  if Bank.DepositAll() then
+    Result := WaitUntil(not Inventory.ContainsItem(Self.Wine), 300, 5000);
+
+  Self.TotalActions += count;
+  Self.TotalProfit += count * Self.ActionProfit;
+  Self.TotalXp += Self.ActionXp * count;
+  WriteLn("Total XP: " + ToStr(Self.TotalXp));
+  WriteLn("Xp/hour: " + ToStr(Self.ActionXp * NumberPerHour(Self.TotalActions, Self.TimeRunning.ElapsedTime())));
+end;
+
+function TScript.Withdraw(): Boolean; overload;
+begin
+  if Self.Withdraw([Self.Grape, 14, False]) and Self.Withdraw([Self.Jug, 14, False]) then
+    Result := WaitUntil(Inventory.ContainsAny([Self.Grape ,Self.Wine]), 300, 5000);
+end;
+
+function TScript.MakeWines(): Boolean;
+begin
+  if Inventory.Use(Self.Grape, Self.Jug) then
+    Result := Make.IsOpen(3000);
+end;
+
+function TScript.HandleMake(): Boolean;
+begin
+  Self.IsMaking := Result := Make.Select(Self.MakeName, MAKE_QUANTITY_ALL, SRL.Dice(98.5));
+  if Result then
+    WaitUntil(not Make.IsOpen(), 100, 2000);
+end;
+
+function TScript.IsMakingWines(WaitTime: Int32 = 3000): Boolean;
+var
+  count: Int32;
+begin
+  count := Inventory.Count();
+  Result := WaitUntil(count > Inventory.Count(), 100, WaitTime)
+
+  if Result then
+    WL.Activity.Restart();
+end;
+
+function TScript.WaitWines(): Boolean;
+begin
+  if Self.IsMaking then
+    Result := Self.IsMaking := Inventory.ContainsAny([Self.Grape, Self.Jug]) and Self.IsMakingWines()
+  else
+    Result := Self.IsMaking := Self.IsMakingWines();
+
+  if Result then
+    WL.Activity.Restart();
+end;
+
+
+function TScript.GetState(): EWineState;
+begin
+  if WL.Activity.IsFinished() then
+    Exit(END_SCRIPT);
+
+  if ChooseOption.IsOpen() then
+    Exit(EWineState.CLOSE_CONTEXT)
+
+  if Chat.LeveledUp() then
+  begin
+    Self.IsMaking := False;
+    Exit(EWineState.LEVEL_UP);
+  end
+
+  if Make.IsOpen() then
+    Exit(EWineState.HANDLE_MAKE);
+
+  if MainScreen.HasInterface() then
+  begin
+    if Bank.IsOpen() then
+    begin
+      if Inventory.ContainsItem(Self.Wine) then  //add your deposit items condition
+        Exit(EWineState.DEPOSIT_WINES);
+
+      if not Inventory.ContainsAll([Self.Grape, Self.Jug]) then //add your withdraw items condition
+        Exit(EWineState.WITHDRAW_SUPPLIES);
+
+      if Inventory.IsFull() and not Inventory.ContainsItem(Self.Jug) then
+        Bank.DepositAll();
+
+      Exit(EWineState.CLOSE_INTERFACE)
+    end;
+
+    if not Self.CollectEmpty and CollectBox.IsOpen() then
+      Exit(HANDLE_COLLECT);
+
+    Exit(CLOSE_INTERFACE);
+  end;
+
+  if Self.BankEmpty then
+  begin
+    if Self.CollectEmpty then
+      Exit(OUT_OF_SUPPLIES);
+
+    Exit(OPEN_COLLECT);
+  end;
+
+  if Inventory.ContainsAll([Self.Grape, Self.Jug]) then
+  begin
+    if Self.IsMaking then
+      EXIT(EWineState.WAIT_WINE);
+
+    EXIT(EWineState.MAKE_WINE);
+  end;
+  Self.IsMaking := False;
+end;
+
+procedure TScript.Run(maxActions: Int32; maxTime: Int64);
+begin
+  Self.Init(maxActions, maxTime);
+
+  repeat
+    Self.State := Self.GetState();
+    Self.SetAction(ToStr(Self.State));
+
+    case State of
+      EWineState.OPEN_BANK: Bank.WalkOpen();
+      EWineState.OPEN_COLLECT: CollectBox.WalkOpen();
+      EWineState.WITHDRAW_SUPPLIES: Self.Withdraw();
+      EWineState.DEPOSIT_WINES: Self.Deposit();
+
+      EWineState.MAKE_WINE: Self.MakeWines();
+      EWineState.HANDLE_MAKE: Self.HandleMake();
+      EWineState.WAIT_WINE: Self.WaitWines();
+
+
+      EWineState.HANDLE_COLLECT: Self.HandleCollectBox([Self.Grape, Self.Jug]);
+      EWineState.CLOSE_INTERFACE: MainScreen.CloseInterface();
+      EWineState.CLOSE_CONTEXT: ChooseOption.Close();
+      EWineState.LEVEL_UP: Chat.HandleLevelUp();
+
+      OUT_OF_SUPPLIES, END_SCRIPT: Break;
+    end;
+
+    Self.DoAntiban();
+  until Self.ShouldStop();
+end;
+
+var
+  Script: TScript;
+
+{$IFDEF SCRIPT_GUI}
+type
+  TConfig = record(TScriptForm)
+      Info: TLabel;
+  end;
+
+procedure TConfig.StartScript(Sender: TObject); override;
+begin
+  inherited;
+end;
+
+procedure TConfig.Run(); override;
+var
+  tab: TTabSheet;
+begin
+  Self.Setup('Khaos Wine Maker');
+  Self.Start.setOnClick(@Self.StartScript);
+
+  Self.AddTab('Script Settings');
+  tab := Self.Tabs[High(Self.Tabs)];
+
+  Self.CreateAccountManager(tab);
+
+  with Self.Info do
+  begin
+    Create(tab);
+    SetCaption('Makes wines :)');
+    SetTop(TControl.AdjustToDPI(200));
+    SetLeft(TControl.AdjustToDPI(50));
+  end;
+
+  Self.CreateVersionPanel(tab);
+
+  Self.CreateAntibanManager();
+  Self.CreateBankSettings();
+  Self.CreateWaspLibSettings();
+  Self.CreateAPISettings();
+
+  inherited;
+end;
+
+var
+  Config: TConfig;
+{$ENDIF}
+
+begin
+  {$IFDEF SCRIPT_GUI}
+  Config.Run();
+  {$ENDIF}
+  Script.Run(WLSettings.MaxActions, WLSettings.MaxTime);
+end.
